@@ -7,19 +7,16 @@
 - کارت وای‌فای سازگار با **monitor mode** (اینجکشن)
 - اسکریپت خودش `aircrack-ng` را نصب می‌کند
 
-## نصب روی لپ‌تاپ (ریپو خصوصی)
+## نصب و اجرا (یک دستور، کپی کن — بدون git clone)
 
-یک‌بار لاگین:
 ```bash
-sudo apt install gh -y
-gh auth login          # GitHub.com → HTTPS → Login with browser
+curl -fsSL https://raw.githubusercontent.com/mariamtchelidze66/wifi-audit/main/install.sh | sudo bash
 ```
 
-بعد:
+یا با wget:
+
 ```bash
-gh repo clone mariamtchelidze66/wifi-audit
-cd wifi-audit
-sudo ./wifi-audit.sh
+wget -qO- https://raw.githubusercontent.com/mariamtchelidze66/wifi-audit/main/install.sh | sudo bash
 ```
 
 ## این اسکریپت چه می‌کند
@@ -35,5 +32,5 @@ sudo ./wifi-audit.sh
 
 ## wordlist دلخواه
 ```bash
-sudo ./wifi-audit.sh /path/to/wordlist.txt
+curl -fsSL https://raw.githubusercontent.com/mariamtchelidze66/wifi-audit/main/wifi-audit.sh -o wifi-audit.sh && sudo bash wifi-audit.sh /path/to/wordlist.txt
 ```
