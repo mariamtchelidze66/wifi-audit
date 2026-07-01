@@ -117,7 +117,8 @@ info "۳۰ ثانیه صبر برای ثبت handshake..."
 sleep 30
 kill "$DUMP" 2>/dev/null || true
 
-if aircrack-ng cap-01.cap 2>/dev/null | grep -q "1 handshake"; then
+CAP="$(ls -t cap-*.cap 2>/dev/null | head -1)"
+if [[ -n "$CAP" ]] && aircrack-ng "$CAP" 2>/dev/null | grep -q "1 handshake"; then
   ok "handshake ثبت شد."
 else
   warn "handshake ثبت نشد. دوباره اجرا کن یا یک دستگاه را دستی وصل/قطع کن."
@@ -125,20 +126,39 @@ else
 fi
 
 # ---------- ۷) تست پسورد با wordlist ----------
-WL="${1:-/usr/share/wordlists/rockyou.txt}"
-if [[ ! -f "$WL" ]]; then
-  warn "wordlist پیدا نشد: $WL"
-  read -rp "مسیر یک wordlist بده: " WL
+# مسیرِ آرگومان، وگرنه wordlistهای رایج (فشرده هم قبول)
+WL="${1:-}"
+if [[ -z "$WL" ]]; then
+  for c in /usr/share/wordlists/rockyou.txt /usr/share/wordlists/rockyou.txt.gz \
+           /usr/share/wordlists/nmap.lst /usr/share/dict/words; do
+    [[ -f "$c" ]] && { WL="$c"; break; }
+  done
 fi
-[[ -f "$WL" ]] || { err "wordlist نامعتبر."; exit 1; }
+# اگر فشرده است، بازش کن
+if [[ "$WL" == *.gz && -f "$WL" ]]; then
+  info "باز کردن wordlist فشرده (یک‌بار)..."
+  gunzip -kf "$WL"
+  WL="${WL%.gz}"
+fi
+if [[ ! -f "$WL" ]]; then
+  err "هیچ wordlist‌ی پیدا نشد."
+  err "با مسیرِ یک wordlist دوباره اجرا کن مثلاً:"
+  err "   sudo ./wifi-audit.sh /usr/share/wordlists/rockyou.txt"
+  exit 1
+fi
 
-info "تست پسورد با $WL ..."
-aircrack-ng -w "$WL" -b "$BSSID" cap-01.cap | tee result.txt
+info "تست پسورد با: $WL"
+info "این ممکن است از چند ثانیه تا چند دقیقه طول بکشد؛ صبر کن..."
+set +e                       # aircrack وقتی پیدا نکند کدِ خطا می‌دهد؛ نگذار set -e بکشد
+aircrack-ng -w "$WL" -b "$BSSID" "$CAP" | tee result.txt
+set -e
 
 if grep -q "KEY FOUND" result.txt; then
-  err "پسوردت شکسته شد → ضعیف است، عوضش کن!"
+  echo
+  err "🔴 پسوردت شکسته شد → ضعیف است! رمزِ پیداشده بالا در خطِ KEY FOUND است. حتماً عوضش کن."
 else
-  ok "پسورد در این wordlist پیدا نشد → نسبتاً مقاوم."
+  echo
+  ok "🟢 پسورد در این wordlist پیدا نشد → نسبتاً مقاوم است."
 fi
 
 echo
