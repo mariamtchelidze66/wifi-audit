@@ -49,28 +49,59 @@ ok "کارت انتخاب‌شده: $IFACE"
 # ---------- ۴) monitor mode ----------
 info "روشن‌کردن monitor mode..."
 airmon-ng check kill >/dev/null 2>&1 || true
-airmon-ng start "$IFACE" >/dev/null
-MON="$(iw dev | awk '/Interface/{print $2}' | grep -m1 -E 'mon|wlan' )"
-MON="${MON:-${IFACE}mon}"
-ok "مانیتور: $MON"
+# نامِ کارت را قبل و بعد از airmon مقایسه می‌کنیم تا نامِ واقعیِ مانیتور را پیدا کنیم
+BEFORE="$(iw dev | awk '/Interface/{print $2}' | sort)"
+airmon-ng start "$IFACE" >/dev/null 2>&1 || true
+sleep 2
+AFTER="$(iw dev | awk '/Interface/{print $2}' | sort)"
+# کارتی که تازه اضافه شده = مانیتور؛ اگر نامی عوض نشد، همان کارت monitor شده
+MON="$(comm -13 <(echo "$BEFORE") <(echo "$AFTER") | head -1)"
+[[ -z "$MON" ]] && MON="$IFACE"
+# مطمئن شو واقعاً monitor است
+if ! iw dev "$MON" info 2>/dev/null | grep -q "type monitor"; then
+  ip link set "$MON" down 2>/dev/null || true
+  iw dev "$MON" set type monitor 2>/dev/null || true
+  ip link set "$MON" up 2>/dev/null || true
+fi
+iw dev "$MON" info 2>/dev/null | grep -q "type monitor" \
+  && ok "مانیتور فعال شد: $MON" \
+  || { err "monitor mode روی $MON فعال نشد؛ کارت پشتیبانی نمی‌کند."; exit 1; }
 
 cleanup(){
-  warn "بازگردانی کارت به حالت عادی..."
+  warn "بازگردانی کارت به حالت عادی و روشن‌کردن وای‌فای..."
   airmon-ng stop "$MON" >/dev/null 2>&1 || true
-  systemctl restart NetworkManager >/dev/null 2>&1 || service network-manager restart >/dev/null 2>&1 || true
-  ok "تمام شد."
+  # کارت را از monitor به managed برگردان
+  ip link set "$MON" down 2>/dev/null || true
+  iw dev "$MON" set type managed 2>/dev/null || true
+  ip link set "$MON" up 2>/dev/null || true
+  # هر سرویسِ شبکه‌ای که موجود بود را ری‌استارت کن (بی‌سروصدا)
+  systemctl restart NetworkManager 2>/dev/null \
+    || service network-manager restart 2>/dev/null \
+    || systemctl restart wpa_supplicant 2>/dev/null || true
+  nmcli radio wifi on 2>/dev/null || true
+  ok "تمام شد. اگر وای‌فای وصل نشد، فقط لپ‌تاپ را reboot کن."
 }
 trap cleanup EXIT
 
 # ---------- ۵) اسکن شبکه‌ها ----------
 WORK="$(mktemp -d)"; cd "$WORK"
-info "اسکن شبکه‌ها ۲۰ ثانیه... (Ctrl+C را نزن، خودش تمام می‌شود)"
-timeout 20 airodump-ng --output-format csv -w scan "$MON" >/dev/null 2>&1 || true
+info "اسکن شبکه‌ها (~۱۵ ثانیه)... صبر کن، خودش تمام می‌شود و لیست می‌آید."
+# airodump را در پس‌زمینه اجرا می‌کنیم و با SIGINT (نه SIGTERM) تمیز می‌بندیم
+# تا csv را کامل بنویسد. این مطمئن‌تر از timeout است.
+airodump-ng --output-format csv -w scan "$MON" >/dev/null 2>&1 &
+SCAN=$!
+sleep 15
+kill -INT "$SCAN" 2>/dev/null || true
+sleep 2
+kill -9 "$SCAN" 2>/dev/null || true   # اگر بازنشد، قطعی می‌کشیم
 echo
 info "شبکه‌های پیداشده:"
-awk -F',' 'NF>13 && $1 ~ /:/ {gsub(/^ +| +$/,"",$14); gsub(/^ +| +$/,"",$1); gsub(/^ +| +$/,"",$4);
-  printf "%2d) SSID:%-25s BSSID:%s  CH:%s\n", ++i, $14, $1, $4}' scan-01.csv | tee nets.txt
-[[ -s nets.txt ]] || { err "شبکه‌ای پیدا نشد."; exit 1; }
+CSV="$(ls -t scan-*.csv 2>/dev/null | head -1)"
+[[ -n "$CSV" ]] || { err "اسکن خروجی نداد؛ monitor mode یا کارت مشکل دارد."; exit 1; }
+awk -F',' 'NF>13 && $1 ~ /^([0-9A-Fa-f]{2}:){5}/ {
+  gsub(/^ +| +$/,"",$1); gsub(/^ +| +$/,"",$4); gsub(/^ +| +$/,"",$14);
+  printf "%2d) SSID:%-25s BSSID:%s  CH:%s\n", ++i, $14, $1, $4}' "$CSV" | tee nets.txt
+[[ -s nets.txt ]] || { err "شبکه‌ای پیدا نشد. کارت را چند ثانیه بعد دوباره امتحان کن."; exit 1; }
 
 read -rp "BSSID وای‌فای خودت را کپی کن: " BSSID
 read -rp "کانالش (CH): " CH
