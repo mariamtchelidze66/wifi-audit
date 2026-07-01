@@ -1,132 +1,140 @@
 #!/usr/bin/env bash
 #
-# wifi-audit.sh — تست امنیت وای‌فایِ *خودت* (فقط شبکه‌ای که مالکش هستی)
-# روی لپ‌تاپ/کالی لینوکس اجرا کن. به کارت وای‌فایِ سازگار با monitor mode نیاز دارد.
+# wifi-audit.sh - Test the security of YOUR OWN Wi-Fi (a network you own).
+# Run on a Linux laptop (Kali/Ubuntu) with a Wi-Fi card that supports monitor mode.
 #
-# استفاده:  sudo ./wifi-audit.sh
+# Usage:  sudo ./wifi-audit.sh [optional_wordlist_path]
 #
-set -euo pipefail
+set -uo pipefail   # note: no `-e` so a single failing command never kills the run
 
-# ---------- رنگ و لاگ ----------
+# ---------- colors / logging ----------
 R="\033[31m"; G="\033[32m"; Y="\033[33m"; C="\033[36m"; N="\033[0m"
 info(){ echo -e "${C}[*]${N} $*"; }
 ok(){   echo -e "${G}[+]${N} $*"; }
 warn(){ echo -e "${Y}[!]${N} $*"; }
 err(){  echo -e "${R}[x]${N} $*" >&2; }
 
-# ---------- ۰) هشدار قانونی ----------
+# ---------- 0) legal warning ----------
 clear
 cat <<'BANNER'
 ==========================================================
-   Wi-Fi Security Audit  —  فقط روی شبکهٔ خودت مجاز است
-   تست شبکهٔ دیگران بدون اجازه جرم است.
+   Wi-Fi Security Audit - ONLY on a network you own.
+   Testing someone else's network without permission
+   is illegal.
 ==========================================================
 BANNER
-read -rp "تأیید می‌کنی که مالکِ این وای‌فای هستی؟ (yes/no) " AGREE
-[[ "$AGREE" == "yes" ]] || { err "لغو شد."; exit 1; }
+read -rp "Do you confirm you OWN this Wi-Fi? (yes/no) " AGREE
+[[ "$AGREE" == "yes" ]] || { err "Aborted."; exit 1; }
 
-# ---------- ۱) root ----------
-[[ $EUID -eq 0 ]] || { err "با sudo اجرا کن:  sudo $0"; exit 1; }
+# ---------- 1) must be root ----------
+[[ $EUID -eq 0 ]] || { err "Run as root:  sudo $0"; exit 1; }
 
-# ---------- ۲) نصب پیش‌نیازها ----------
-info "بررسی/نصب پیش‌نیازها (aircrack-ng)..."
+# ---------- 2) install dependencies ----------
+info "Checking dependencies (aircrack-ng)..."
 if ! command -v airmon-ng >/dev/null 2>&1; then
   if   command -v apt    >/dev/null 2>&1; then apt update -y && apt install -y aircrack-ng
   elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm aircrack-ng
   elif command -v dnf    >/dev/null 2>&1; then dnf install -y aircrack-ng
-  else err "پکیج‌منیجر ناشناخته؛ aircrack-ng را دستی نصب کن."; exit 1
+  else err "Unknown package manager; install aircrack-ng manually."; exit 1
   fi
 fi
-ok "aircrack-ng آماده است."
+command -v airmon-ng >/dev/null 2>&1 || { err "aircrack-ng install failed."; exit 1; }
+ok "aircrack-ng ready."
 
-# ---------- ۳) انتخاب کارت وای‌فای ----------
-info "کارت‌های وای‌فای موجود:"
+# ---------- 3) pick the Wi-Fi interface ----------
+info "Available Wi-Fi interfaces:"
 mapfile -t IFACES < <(iw dev 2>/dev/null | awk '/Interface/{print $2}')
-[[ ${#IFACES[@]} -gt 0 ]] || { err "هیچ کارت وای‌فایی پیدا نشد."; exit 1; }
+[[ ${#IFACES[@]} -gt 0 ]] || { err "No Wi-Fi interface found."; exit 1; }
 select IFACE in "${IFACES[@]}"; do [[ -n "${IFACE:-}" ]] && break; done
-ok "کارت انتخاب‌شده: $IFACE"
+ok "Selected interface: $IFACE"
 
-# ---------- ۴) monitor mode ----------
-info "روشن‌کردن monitor mode..."
+# ---------- 4) enable monitor mode ----------
+info "Enabling monitor mode..."
 airmon-ng check kill >/dev/null 2>&1 || true
-# نامِ کارت را قبل و بعد از airmon مقایسه می‌کنیم تا نامِ واقعیِ مانیتور را پیدا کنیم
 BEFORE="$(iw dev | awk '/Interface/{print $2}' | sort)"
 airmon-ng start "$IFACE" >/dev/null 2>&1 || true
 sleep 2
 AFTER="$(iw dev | awk '/Interface/{print $2}' | sort)"
-# کارتی که تازه اضافه شده = مانیتور؛ اگر نامی عوض نشد، همان کارت monitor شده
 MON="$(comm -13 <(echo "$BEFORE") <(echo "$AFTER") | head -1)"
 [[ -z "$MON" ]] && MON="$IFACE"
-# مطمئن شو واقعاً monitor است
 if ! iw dev "$MON" info 2>/dev/null | grep -q "type monitor"; then
   ip link set "$MON" down 2>/dev/null || true
   iw dev "$MON" set type monitor 2>/dev/null || true
   ip link set "$MON" up 2>/dev/null || true
 fi
-iw dev "$MON" info 2>/dev/null | grep -q "type monitor" \
-  && ok "مانیتور فعال شد: $MON" \
-  || { err "monitor mode روی $MON فعال نشد؛ کارت پشتیبانی نمی‌کند."; exit 1; }
+if iw dev "$MON" info 2>/dev/null | grep -q "type monitor"; then
+  ok "Monitor mode active on: $MON"
+else
+  err "Could not enable monitor mode on $MON; card may not support it."
+  exit 1
+fi
 
+# ---------- cleanup: always restore Wi-Fi on exit ----------
 cleanup(){
-  warn "بازگردانی کارت به حالت عادی و روشن‌کردن وای‌فای..."
+  warn "Restoring interface and Wi-Fi..."
   airmon-ng stop "$MON" >/dev/null 2>&1 || true
-  # کارت را از monitor به managed برگردان
   ip link set "$MON" down 2>/dev/null || true
   iw dev "$MON" set type managed 2>/dev/null || true
   ip link set "$MON" up 2>/dev/null || true
-  # هر سرویسِ شبکه‌ای که موجود بود را ری‌استارت کن (بی‌سروصدا)
   systemctl restart NetworkManager 2>/dev/null \
     || service network-manager restart 2>/dev/null \
     || systemctl restart wpa_supplicant 2>/dev/null || true
   nmcli radio wifi on 2>/dev/null || true
-  ok "تمام شد. اگر وای‌فای وصل نشد، فقط لپ‌تاپ را reboot کن."
+  ok "Done. If Wi-Fi did not reconnect, just reboot the laptop."
 }
 trap cleanup EXIT
 
-# ---------- ۵) اسکن شبکه‌ها ----------
+# ---------- 5) scan networks ----------
 WORK="$(mktemp -d)"; cd "$WORK"
-info "اسکن شبکه‌ها (~۱۵ ثانیه)... صبر کن، خودش تمام می‌شود و لیست می‌آید."
-# airodump را در پس‌زمینه اجرا می‌کنیم و با SIGINT (نه SIGTERM) تمیز می‌بندیم
-# تا csv را کامل بنویسد. این مطمئن‌تر از timeout است.
+info "Scanning networks (~15s)... please wait, the list will appear."
 airodump-ng --output-format csv -w scan "$MON" >/dev/null 2>&1 &
 SCAN=$!
 sleep 15
 kill -INT "$SCAN" 2>/dev/null || true
 sleep 2
-kill -9 "$SCAN" 2>/dev/null || true   # اگر بازنشد، قطعی می‌کشیم
+kill -9 "$SCAN" 2>/dev/null || true
 echo
-info "شبکه‌های پیداشده:"
+info "Networks found:"
 CSV="$(ls -t scan-*.csv 2>/dev/null | head -1)"
-[[ -n "$CSV" ]] || { err "اسکن خروجی نداد؛ monitor mode یا کارت مشکل دارد."; exit 1; }
-awk -F',' 'NF>13 && $1 ~ /^([0-9A-Fa-f]{2}:){5}/ {
+[[ -n "$CSV" ]] || { err "Scan produced no output; card/monitor problem."; exit 1; }
+awk -F',' '$1 ~ /^([0-9A-Fa-f]{2}:){5}/ {
   gsub(/^ +| +$/,"",$1); gsub(/^ +| +$/,"",$4); gsub(/^ +| +$/,"",$14);
-  printf "%2d) SSID:%-25s BSSID:%s  CH:%s\n", ++i, $14, $1, $4}' "$CSV" | tee nets.txt
-[[ -s nets.txt ]] || { err "شبکه‌ای پیدا نشد. کارت را چند ثانیه بعد دوباره امتحان کن."; exit 1; }
+  printf "%2d) SSID: %-25s BSSID: %s  CH: %s\n", ++i, $14, $1, $4}' "$CSV" | tee nets.txt
+[[ -s nets.txt ]] || { err "No networks found. Wait a few seconds and retry."; exit 1; }
 
-read -rp "BSSID وای‌فای خودت را کپی کن: " BSSID
-read -rp "کانالش (CH): " CH
+echo
+read -rp "Enter the BSSID of YOUR Wi-Fi (AA:BB:CC:DD:EE:FF): " BSSID
+read -rp "Enter its channel (CH): " CH
 
-# ---------- ۶) گرفتن handshake ----------
-info "گوش‌دادن برای handshake روی $BSSID (کانال $CH)..."
+# ---------- 6) capture handshake (robust loop) ----------
+info "Listening for handshake on $BSSID (channel $CH)..."
 airodump-ng -c "$CH" --bssid "$BSSID" -w cap "$MON" >/dev/null 2>&1 &
 DUMP=$!
 sleep 3
-info "ارسال deauth برای وادارکردن دستگاه‌ها به اتصال دوباره..."
-aireplay-ng --deauth 10 -a "$BSSID" "$MON" >/dev/null 2>&1 || true
-info "۳۰ ثانیه صبر برای ثبت handshake..."
-sleep 30
+
+GOT=0
+# Up to 6 rounds: deauth clients, then check if a handshake was captured.
+for round in 1 2 3 4 5 6; do
+  info "Round $round/6: sending deauth to force clients to reconnect..."
+  aireplay-ng --deauth 8 -a "$BSSID" "$MON" >/dev/null 2>&1 || true
+  sleep 12
+  CAP="$(ls -t cap-*.cap 2>/dev/null | head -1)"
+  if [[ -n "$CAP" ]] && aircrack-ng "$CAP" 2>/dev/null | grep -q "1 handshake"; then
+    GOT=1; break
+  fi
+  info "No handshake yet, retrying..."
+done
 kill "$DUMP" 2>/dev/null || true
 
-CAP="$(ls -t cap-*.cap 2>/dev/null | head -1)"
-if [[ -n "$CAP" ]] && aircrack-ng "$CAP" 2>/dev/null | grep -q "1 handshake"; then
-  ok "handshake ثبت شد."
-else
-  warn "handshake ثبت نشد. دوباره اجرا کن یا یک دستگاه را دستی وصل/قطع کن."
+if [[ "$GOT" -ne 1 ]]; then
+  err "No handshake captured."
+  err "A device (phone/laptop) must be connected to this Wi-Fi so it can reconnect."
+  err "Connect a device to the Wi-Fi, then run this script again."
   exit 1
 fi
+ok "Handshake captured."
 
-# ---------- ۷) تست پسورد با wordlist ----------
-# مسیرِ آرگومان، وگرنه wordlistهای رایج (فشرده هم قبول)
+# ---------- 7) test the password against a wordlist ----------
 WL="${1:-}"
 if [[ -z "$WL" ]]; then
   for c in /usr/share/wordlists/rockyou.txt /usr/share/wordlists/rockyou.txt.gz \
@@ -134,32 +142,27 @@ if [[ -z "$WL" ]]; then
     [[ -f "$c" ]] && { WL="$c"; break; }
   done
 fi
-# اگر فشرده است، بازش کن
 if [[ "$WL" == *.gz && -f "$WL" ]]; then
-  info "باز کردن wordlist فشرده (یک‌بار)..."
+  info "Decompressing wordlist (one time)..."
   gunzip -kf "$WL"
   WL="${WL%.gz}"
 fi
 if [[ ! -f "$WL" ]]; then
-  err "هیچ wordlist‌ی پیدا نشد."
-  err "با مسیرِ یک wordlist دوباره اجرا کن مثلاً:"
+  err "No wordlist found. Re-run with a wordlist path, e.g.:"
   err "   sudo ./wifi-audit.sh /usr/share/wordlists/rockyou.txt"
   exit 1
 fi
 
-info "تست پسورد با: $WL"
-info "این ممکن است از چند ثانیه تا چند دقیقه طول بکشد؛ صبر کن..."
-set +e                       # aircrack وقتی پیدا نکند کدِ خطا می‌دهد؛ نگذار set -e بکشد
+info "Testing password with: $WL"
+info "This can take a few seconds to a few minutes; please wait..."
 aircrack-ng -w "$WL" -b "$BSSID" "$CAP" | tee result.txt
-set -e
 
+echo
 if grep -q "KEY FOUND" result.txt; then
-  echo
-  err "🔴 پسوردت شکسته شد → ضعیف است! رمزِ پیداشده بالا در خطِ KEY FOUND است. حتماً عوضش کن."
+  err "RESULT: PASSWORD CRACKED -> it is WEAK. The key is on the 'KEY FOUND' line above. Change it!"
 else
-  echo
-  ok "🟢 پسورد در این wordlist پیدا نشد → نسبتاً مقاوم است."
+  ok "RESULT: password NOT in this wordlist -> reasonably strong."
 fi
 
 echo
-info "فایل‌های خروجی در: $WORK"
+info "Output files are in: $WORK"
